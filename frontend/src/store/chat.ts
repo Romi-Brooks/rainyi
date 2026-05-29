@@ -154,11 +154,14 @@ export const useChatStore = defineStore('chat', () => {
     const token = localStorage.getItem('token')
     if (!token) return
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    const url = `${protocol}//${host}/api/ws/chat?token=${token}`
-
-    ws.value = new WebSocket(url)
+    const wsUrl = import.meta.env.VITE_WS_URL
+    if (wsUrl) {
+      ws.value = new WebSocket(`${wsUrl}?token=${token}`)
+    } else {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const host = window.location.host
+      ws.value = new WebSocket(`${protocol}//${host}/api/ws/chat?token=${token}`)
+    }
 
     ws.value.onopen = () => {
       wsConnected.value = true
