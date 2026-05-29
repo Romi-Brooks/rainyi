@@ -2,6 +2,7 @@
 .env
 .env.local
 *.env.local
+.env.production.local
 .env.production
 .env.development
 
@@ -15,6 +16,9 @@ frontend/package-lock.json
 
 # Android Apk
 frontend/android/
+
+# Capacitor config (contains server URL)
+frontend/capacitor.config.json
 
 # IDE
 .idea/

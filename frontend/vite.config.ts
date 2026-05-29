@@ -7,16 +7,16 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: 'http://119.13.104.225:8080',
         changeOrigin: true,
         ws: true,
       },
       '/static': {
-        target: 'http://localhost:8080',
+        target: 'http://119.13.104.225:8080',
         changeOrigin: true,
       },
       '/storage': {
-        target: 'http://localhost:8080',
+        target: 'http://119.13.104.225:8080',
         changeOrigin: true,
       },
     },
