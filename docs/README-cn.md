@@ -85,8 +85,11 @@ rain-yi/
 │   │   ├── App.vue
 │   │   ├── main.ts
 │   │   └── env.d.ts
-│   ├── .env.development
-│   ├── .env.production
+│   ├── .env.development          # 本地开发（不被 git 跟踪）
+│   ├── .env.development.example
+│   ├── .env.production           # 生产构建（不被 git 跟踪）
+│   ├── .env.production.example
+│   ├── .env.production.local     # APK 构建时的真实服务器地址（被 .gitignore 排除）
 │   ├── index.html
 │   ├── package.json
 │   ├── tsconfig.json
@@ -240,6 +243,49 @@ pnpm dev
 ### 4. 访问
 
 打开浏览器访问 `http://localhost:5173`，注册账号后即可开始使用。
+
+### 5. 构建 Android APK（Capacitor）
+
+前端可以通过 Capacitor 打包为 Android APK。
+
+#### 环境要求
+- Android Studio（含 Android SDK）
+- JDK 21+（推荐使用 Android Studio 自带的 JBR JDK）
+
+#### 构建步骤
+
+```bash
+cd frontend
+
+# 配置你的服务器地址
+# 创建 frontend/.env.production.local，填入：
+#   VITE_API_URL=http://your-server.com:8080/api
+#   VITE_WS_URL=ws://your-server.com:8080/api/ws/chat
+#
+# 或者直接复制模板：
+#   cp .env.production.example .env.production.local
+#   然后编辑 .env.production.local 填入你的服务器地址
+
+# （仅首次）添加 Android 平台
+npx cap add android
+
+# 构建 APK（编译前端 → 同步 Capacitor → 编译 APK）
+pnpm cap:build
+```
+
+APK 生成位置：
+```
+frontend/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+> **注意：** `frontend/android/` 已被 `.gitignore` 排除，不会提交到 GitHub。
+
+#### 构建说明
+- APK 从**本地资源**加载前端界面（页面打包在 APK 内部）
+- API 请求发向 `.env.production.local` 中配置的服务器地址
+- 服务器地址在**编译时注入** JavaScript 代码
+- 修改服务器地址后，编辑 `.env.production.local` 重新运行 `pnpm cap:build` 即可
+- `.env.production.local` 已被 `.gitignore` 排除，不会误提交
 
 ### 内置技能
 

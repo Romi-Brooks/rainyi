@@ -85,8 +85,11 @@ rain-yi/
 │   │   ├── App.vue
 │   │   ├── main.ts
 │   │   └── env.d.ts
-│   ├── .env.development
-│   ├── .env.production
+│   ├── .env.development          # Local dev (not tracked by git)
+│   ├── .env.development.example
+│   ├── .env.production           # Production build (not tracked by git)
+│   ├── .env.production.example
+│   ├── .env.production.local     # Real server URL for APK build (gitignored)
 │   ├── index.html
 │   ├── package.json
 │   ├── tsconfig.json
@@ -239,6 +242,52 @@ pnpm dev
 ### 4. Access
 
 Open your browser at `http://localhost:5173`, register an account, and start chatting.
+
+### 5. Build Android APK (Capacitor)
+
+The frontend can be packaged as an Android APK using Capacitor.
+
+#### Prerequisites
+- Android Studio (with Android SDK)
+- JDK 21+ (Android Studio JBR bundled JDK recommended)
+
+#### Setup
+
+```bash
+cd frontend
+
+# Install dependencies (already done if you followed step 3)
+pnpm install
+
+# Configure your server address
+# Create frontend/.env.production.local with:
+#   VITE_API_URL=http://your-server.com:8080/api
+#   VITE_WS_URL=ws://your-server.com:8080/api/ws/chat
+#
+# Or use the example template:
+#   cp .env.production.example .env.production.local
+#   # then edit .env.production.local with your server address
+
+# (First time only) Add the Android platform
+npx cap add android
+
+# Build the APK (builds frontend, syncs with Capacitor, compiles APK)
+pnpm cap:build
+```
+
+The APK will be generated at:
+```
+frontend/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+> **Note:** `frontend/android/` is in `.gitignore` and will not be committed.
+
+#### Build Notes
+- The APK loads the frontend UI from **local assets** (packaged inside the APK)
+- API calls are made to the server address configured in `.env.production.local`
+- The server address is **compile-time injected** into the JavaScript bundle
+- To update the server address, edit `.env.production.local` and re-run `pnpm cap:build`
+- Never commit `.env.production.local` — it's already excluded by `.gitignore`
 
 ### Built-in Skills
 

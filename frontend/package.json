@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "type-check": "vue-tsc --noEmit"
+    "type-check": "vue-tsc --noEmit",
+    "cap:sync": "npx cap sync",
+    "cap:open": "npx cap open android",
+    "cap:build": "pnpm build && npx cap sync && cd android && gradlew assembleDebug"
   },
   "dependencies": {
     "pinia": "^2.1.7",
@@ -15,6 +18,9 @@
     "vue-router": "^4.2.5"
   },
   "devDependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/cli": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
     "@vitejs/plugin-vue": "^5.0.0",
     "@vue/tsconfig": "^0.9.1",
     "autoprefixer": "^10.4.17",
@@ -23,5 +29,8 @@
     "typescript": "^6.0.3",
     "vite": "^5.0.12",
     "vue-tsc": "^3.2.8"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["@capacitor/cli"]
   }
 }
