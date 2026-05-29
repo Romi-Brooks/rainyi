@@ -1,0 +1,33 @@
+# env
+.env
+.env.local
+*.env.local
+
+# backend
+backend/.env
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+
+# Android Apk
+frontend/android/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# system
+.DS_Store
+Thumbs.db
+
+# log
+*.log
+npm-debug.log*
+
+# temp
+tmp/
+temp/

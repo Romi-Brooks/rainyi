@@ -1,0 +1,11 @@
+{
+  "appId": "com.rainyi.app",
+  "appName": "RainYi",
+  "webDir": "dist",
+  "android": {
+    "buildOptions": {
+      "keystorePath": null,
+      "keystoreAlias": null
+    }
+  }
+}
