@@ -33,33 +33,15 @@ export interface Persona {
   id: number
   user_id: number
   name: string
+  nickname: string
   description: string
+  dir_name: string
+  avatar: string
+  is_active: boolean
   created_at: string
   updated_at: string
   is_built_in?: boolean
-  skill_node_count?: number
-}
-
-export interface SkillNode {
-  id: number
-  persona_id: number
-  parent_id: number | null
-  name: string
-  description: string
-  file_name: string
-  content: string
-  priority: number
-  created_at: string
-  kvs: SkillKV[]
-}
-
-export interface SkillKV {
-  id: number
-  skill_node_id: number
-  key: string
-  value: string
-  sort_order: number
-  created_at: string
+  file_count?: number
 }
 
 export interface LoginResponse {
@@ -93,11 +75,15 @@ export interface PersonaFromServer {
   id: number
   user_id: number
   name: string
+  nickname: string
   description: string
+  dir_name: string
+  avatar: string
+  is_active: boolean
   created_at: string
   updated_at: string
   is_built_in?: boolean
-  skill_node_count?: number
+  file_count?: number
 }
 
 export interface PersonasResponse {
@@ -106,7 +92,18 @@ export interface PersonasResponse {
 
 export interface PersonaResponse {
   persona: PersonaFromServer
-  skill_nodes: SkillNode[]
+  persona_files: PersonaFile[]
+}
+
+export interface PersonaFile {
+  id: number
+  persona_id: number
+  file_name: string
+  minio_path: string
+  priority: number
+  module_category: string
+  file_size: number
+  created_at: string
 }
 
 export interface FileRecord {

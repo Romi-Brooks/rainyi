@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"rain-yi-backend/model"
@@ -11,18 +13,21 @@ import (
 	"rain-yi-backend/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type UploadController struct {
 	fileRepo *repository.FileRepository
 	userRepo *repository.UserRepository
+	convRepo *repository.ConversationRepository
 	storage  service.FileStorage
 }
 
-func NewUploadController(fileRepo *repository.FileRepository, userRepo *repository.UserRepository, storage service.FileStorage) *UploadController {
+func NewUploadController(fileRepo *repository.FileRepository, userRepo *repository.UserRepository, convRepo *repository.ConversationRepository, storage service.FileStorage) *UploadController {
 	return &UploadController{
 		fileRepo: fileRepo,
 		userRepo: userRepo,
+		convRepo: convRepo,
 		storage:  storage,
 	}
 }
@@ -142,7 +147,120 @@ func (ctl *UploadController) ListFiles(c *gin.Context) {
 }
 
 func (ctl *UploadController) UploadAvatar(c *gin.Context) {
-	ctl.handleSingleUpload(c, "avatar", "user")
+	userID := c.GetInt64("user_id")
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请提供文件"})
+		return
+	}
+	defer file.Close()
+
+	if header.Size > 1024*1024 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "文件超过 1MB 限制"})
+		return
+	}
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件失败"})
+		return
+	}
+
+	ext := filepath.Ext(header.Filename)
+	if ext == "" {
+		ext = ".jpg"
+	}
+	objectName := fmt.Sprintf("avatar/user/%d/%s%s", userID, uuid.New().String(), ext)
+
+	record, err := ctl.storage.SaveToPath(objectName, userID, "avatar", "user", userID, header.Filename, strings.NewReader(string(data)), int64(len(data)))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "上传失败: " + err.Error()})
+		return
+	}
+
+	ctl.userRepo.UpdateAvatar(userID, record.URL)
+
+	oldRecords, _ := ctl.fileRepo.FindByReference("user", userID)
+	for i := range oldRecords {
+		o := &oldRecords[i]
+		if o.FileType == "avatar" && o.ID != record.ID {
+			ctl.storage.Delete(o)
+			ctl.fileRepo.SoftDelete(o.ID)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "上传成功",
+		"file":    record,
+	})
+}
+
+func (ctl *UploadController) UploadAIAvatar(c *gin.Context) {
+	userID := c.GetInt64("user_id")
+	convIDStr := c.PostForm("conversation_id")
+	if convIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少会话ID"})
+		return
+	}
+
+	convID, err := strconv.ParseInt(convIDStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的会话ID"})
+		return
+	}
+
+	conv, err := ctl.convRepo.FindByID(convID)
+	if err != nil || conv.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请提供文件"})
+		return
+	}
+	defer file.Close()
+
+	if header.Size > 1024*1024 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "文件超过 1MB 限制"})
+		return
+	}
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件失败"})
+		return
+	}
+
+	ext := filepath.Ext(header.Filename)
+	if ext == "" {
+		ext = ".jpg"
+	}
+	objectName := fmt.Sprintf("avatar/ai/%d/%s%s", convID, uuid.New().String(), ext)
+
+	record, err := ctl.storage.SaveToPath(objectName, userID, "ai_avatar", "conversation", convID, header.Filename, strings.NewReader(string(data)), int64(len(data)))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "上传失败: " + err.Error()})
+		return
+	}
+
+	ctl.convRepo.UpdateAIAvatar(convID, record.URL)
+
+	oldRecords, _ := ctl.fileRepo.FindByReference("conversation", convID)
+	for i := range oldRecords {
+		o := &oldRecords[i]
+		if o.FileType == "ai_avatar" && o.ID != record.ID {
+			ctl.storage.Delete(o)
+			ctl.fileRepo.SoftDelete(o.ID)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "上传成功",
+		"file":    record,
+	})
 }
 
 func (ctl *UploadController) UploadImage(c *gin.Context) {

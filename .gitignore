@@ -17,8 +17,12 @@ frontend/package-lock.json
 # Android Apk
 frontend/android/
 
-# Capacitor config (contains server URL)
+# Capacitor config
 frontend/capacitor.config.json
+
+# Skills
+skills/rain
+
 
 # IDE
 .idea/

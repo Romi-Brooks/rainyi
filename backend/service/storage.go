@@ -24,6 +24,7 @@ type FileStorage interface {
 	Delete(record *model.FileRecord) error
 	GetURL(path string) string
 	Get(path string) (io.ReadCloser, error)
+	SaveToPath(objectName string, userID int64, fileType string, referenceType string, referenceID int64, originalName string, data io.Reader, size int64) (*model.FileRecord, error)
 }
 
 type MinioStorage struct {
@@ -123,6 +124,38 @@ func (s *MinioStorage) Delete(record *model.FileRecord) error {
 
 func (s *MinioStorage) GetURL(path string) string {
 	return fmt.Sprintf("%s/%s/%s", s.publicURL, s.bucket, path)
+}
+
+func (s *MinioStorage) SaveToPath(objectName string, userID int64, fileType string, referenceType string, referenceID int64, originalName string, data io.Reader, size int64) (*model.FileRecord, error) {
+	contentType := detectContentType(filepath.Ext(originalName))
+
+	ctx := context.Background()
+	_, err := s.client.PutObject(ctx, s.bucket, objectName, data, size, minio.PutObjectOptions{
+		ContentType: contentType,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("MinIO 上传失败: %w", err)
+	}
+
+	url := fmt.Sprintf("/storage/%s/%s", s.bucket, objectName)
+
+	record := &model.FileRecord{
+		UserID:        userID,
+		FileType:      fileType,
+		ReferenceID:   referenceID,
+		ReferenceType: referenceType,
+		OriginalName:  originalName,
+		StoragePath:   objectName,
+		URL:           url,
+		Size:          size,
+		MimeType:      contentType,
+	}
+
+	if err := s.repo.Create(record); err != nil {
+		return nil, fmt.Errorf("FileRecord 入库失败: %w", err)
+	}
+
+	return record, nil
 }
 
 func (s *MinioStorage) GetProxiedURL(path string) string {

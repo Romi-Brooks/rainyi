@@ -1,20 +1,18 @@
 package skill
 
 import (
-	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
 	"rain-yi-backend/config"
-	"rain-yi-backend/repository"
 )
 
 type PromptCache struct {
-	mu    sync.RWMutex
-	cache map[int64]*cachedPrompt
-	repo  *repository.PersonaRepository
+	mu           sync.RWMutex
+	cache        map[int64]*cachedPrompt
+	personaCache *PersonaCache
+	personaStg   MDFileStorage
 }
 
 type cachedPrompt struct {
@@ -22,10 +20,11 @@ type cachedPrompt struct {
 	CreatedAt time.Time
 }
 
-func NewPromptCache(repo *repository.PersonaRepository) *PromptCache {
+func NewPromptCache(personaCache *PersonaCache, personaStg MDFileStorage) *PromptCache {
 	return &PromptCache{
-		cache: make(map[int64]*cachedPrompt),
-		repo:  repo,
+		cache:        make(map[int64]*cachedPrompt),
+		personaCache: personaCache,
+		personaStg:   personaStg,
 	}
 }
 
@@ -66,8 +65,36 @@ func (pc *PromptCache) Invalidate(personaID int64) {
 	pc.mu.Unlock()
 
 	if config.RDB != nil {
-		config.RDB.Del(config.RedisCtx, fmt.Sprintf("skill:prompt:%d", personaID))
+		pipe := config.RDB.Pipeline()
+		pipe.Del(config.RedisCtx, fmt.Sprintf("skill:prompt:%d", personaID))
+		pipe.Exec(config.RedisCtx)
 	}
+
+	if pc.personaCache != nil {
+		pc.personaCache.InvalidateFileIndex(personaID)
+		pc.personaCache.InvalidateAllPersonaMD(personaID)
+	}
+}
+
+func (pc *PromptCache) CompileAndCache(personaID int64) string {
+	prompt := pc.buildFromMinIO(personaID)
+	if prompt != "" {
+		pc.Set(personaID, prompt)
+	}
+	return prompt
+}
+
+func (pc *PromptCache) buildFromMinIO(personaID int64) string {
+	if pc.personaCache == nil || pc.personaStg == nil {
+		return ""
+	}
+
+	files, err := pc.personaCache.GetFileIndex(personaID)
+	if err != nil || len(files) == 0 {
+		return ""
+	}
+
+	return CompilePromptFromFiles(files, pc.personaStg, pc.personaCache, personaID)
 }
 
 func (pc *PromptCache) Warmup(personas []struct {
@@ -75,49 +102,9 @@ func (pc *PromptCache) Warmup(personas []struct {
 	Name string
 }) {
 	for _, p := range personas {
-		prompt := pc.buildFromDB(p.ID)
+		prompt := pc.CompileAndCache(p.ID)
 		if prompt != "" {
 			pc.Set(p.ID, prompt)
 		}
 	}
-}
-
-func (pc *PromptCache) CompileAndCache(personaID int64) string {
-	prompt := pc.buildFromDB(personaID)
-	if prompt != "" {
-		pc.Set(personaID, prompt)
-	}
-	return prompt
-}
-
-func (pc *PromptCache) buildFromDB(personaID int64) string {
-	nodes, err := pc.repo.FindSkillNodesByPersonaID(personaID)
-	if err != nil || len(nodes) == 0 {
-		return ""
-	}
-
-	var builder strings.Builder
-	for _, node := range nodes {
-		kvs, err := pc.repo.FindSkillKVsBySkillNodeID(node.ID)
-		if err == nil && len(kvs) > 0 {
-			for _, kv := range kvs {
-				builder.WriteString(fmt.Sprintf("# %s\n%s\n\n", kv.Key, kv.Value))
-			}
-		} else {
-			builder.WriteString(node.Content)
-			builder.WriteString("\n\n")
-		}
-	}
-
-	return strings.TrimSpace(builder.String())
-}
-
-func (pc *PromptCache) MarshalJSON() ([]byte, error) {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-	info := make(map[int64]string)
-	for id, cp := range pc.cache {
-		info[id] = fmt.Sprintf("len=%d age=%s", len(cp.Prompt), time.Since(cp.CreatedAt).Round(time.Second))
-	}
-	return json.Marshal(info)
 }

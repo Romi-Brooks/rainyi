@@ -140,6 +140,9 @@ export const personaAPI = {
     })
   },
 
+  getDebugPrompt: (convId: number) =>
+    request<{ system_prompt: string }>(`/personas/${convId}/debug`),
+
   deleteSkillFile: (personaId: number, nodeId: number) =>
     request<void>(`/personas/${personaId}/files/${nodeId}`, {
       method: 'DELETE',
@@ -163,6 +166,27 @@ export const personaAPI = {
     const formData = new FormData()
     formData.append('file', file)
     return request<{ message: string; file: FileRecord }>('/upload/avatar', {
+      method: 'POST',
+      headers: {},
+      body: formData,
+    })
+  },
+
+  uploadAIAvatar: (file: File, conversationId: number) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('conversation_id', String(conversationId))
+    return request<{ message: string; file: FileRecord }>('/upload/avatar/ai', {
+      method: 'POST',
+      headers: {},
+      body: formData,
+    })
+  },
+
+  uploadPersonaAvatar: (personaId: number, file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return request<{ message: string; avatar: string }>(`/personas/${personaId}/avatar`, {
       method: 'POST',
       headers: {},
       body: formData,

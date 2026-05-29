@@ -32,14 +32,16 @@ func main() {
 	convRepo := repository.NewConversationRepository()
 	msgRepo := repository.NewMessageRepository()
 	personaRepo := repository.NewPersonaRepository()
+	pfRepo := repository.NewPersonaFileRepository()
 	fileRepo := repository.NewFileRepository()
 
-	skillManager := skill.NewSkillManager(personaRepo)
+	personaStg := service.NewPersonaStorage(pfRepo)
+	fileStorage := service.NewMinioStorage(cfg, fileRepo)
+
+	skillManager := skill.NewSkillManager(personaRepo, pfRepo, personaStg)
 	if err := skillManager.LoadSkills(); err != nil {
 		log.Printf("警告: 技能加载失败: %v", err)
 	}
-
-	fileStorage := service.NewMinioStorage(cfg, fileRepo)
 
 	aiService := service.NewAIService(skillManager)
 	contextManager := service.NewContextManager(msgRepo)
@@ -48,9 +50,16 @@ func main() {
 	authController := controller.NewAuthController(userRepo)
 	conversationController := controller.NewConversationController(convRepo, msgRepo, contextManager)
 	chatController := controller.NewChatController(msgRepo, convRepo, aiService, contextManager, hub)
-	personaController := controller.NewPersonaController(personaRepo, convRepo, skillManager.PromptCache(), fileStorage, fileRepo)
+	personaController := controller.NewPersonaController(
+		personaRepo,
+		pfRepo,
+		convRepo,
+		skillManager.PromptCache(),
+		skillManager.PersonaCache(),
+		personaStg,
+	)
 	userController := controller.NewUserController(userRepo)
-	uploadController := controller.NewUploadController(fileRepo, userRepo, fileStorage)
+	uploadController := controller.NewUploadController(fileRepo, userRepo, convRepo, fileStorage)
 
 	r := gin.Default()
 
@@ -143,11 +152,13 @@ func main() {
 			{
 				personas.GET("", personaController.GetPersonas)
 				personas.GET("/:id", personaController.GetPersona)
+				personas.GET("/:id/debug", personaController.DebugPrompt)
 				personas.POST("", personaController.CreatePersona)
 				personas.PUT("/:id", personaController.UpdatePersona)
 				personas.DELETE("/:id", personaController.DeletePersona)
 				personas.POST("/:id/files", personaController.UploadSkillFile)
 				personas.DELETE("/:id/files/:fileId", personaController.DeleteSkillFile)
+				personas.POST("/:id/avatar", personaController.UploadPersonaAvatar)
 				personas.POST("/load", personaController.LoadFromDirectory)
 			}
 
@@ -158,6 +169,7 @@ func main() {
 			{
 				uploads.POST("", uploadController.UploadFile)
 				uploads.POST("/avatar", uploadController.UploadAvatar)
+				uploads.POST("/avatar/ai", uploadController.UploadAIAvatar)
 				uploads.POST("/image", uploadController.UploadImage)
 				uploads.DELETE("/:id", uploadController.DeleteFile)
 				uploads.GET("/list", uploadController.ListFiles)

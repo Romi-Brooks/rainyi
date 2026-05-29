@@ -36,6 +36,10 @@ func (r *ConversationRepository) Update(conv *model.Conversation) error {
 	return config.DB.Save(conv).Error
 }
 
+func (r *ConversationRepository) UpdateAIAvatar(convID int64, avatarURL string) error {
+	return config.DB.Model(&model.Conversation{}).Where("id = ?", convID).Update("ai_avatar", avatarURL).Error
+}
+
 func (r *ConversationRepository) FindOrCreateDefault(userID int64) (*model.Conversation, error) {
 	var conv model.Conversation
 	err := config.DB.Where("user_id = ?", userID).

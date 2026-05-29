@@ -47,35 +47,28 @@ type Message struct {
 }
 
 type Persona struct {
-	ID          int64     `gorm:"primaryKey;autoIncrement" json:"id"`
-	UserID      int64     `gorm:"index;default:0" json:"user_id"`
-	Name        string    `gorm:"size:200;not null" json:"name"`
-	Description string    `gorm:"size:500" json:"description"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          int64          `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID      int64          `gorm:"index;default:0" json:"user_id"`
+	Name        string         `gorm:"size:200;not null" json:"name"`
+	Nickname    string         `gorm:"size:200" json:"nickname"`
+	Description string         `gorm:"size:500" json:"description"`
+	DirName     string         `gorm:"size:200" json:"dir_name"`
+	Avatar      string         `gorm:"size:500" json:"avatar"`
+	IsActive    bool           `gorm:"default:true" json:"is_active"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
-type SkillNode struct {
-	ID          int64     `gorm:"primaryKey;autoIncrement" json:"id"`
-	PersonaID   int64     `gorm:"index;not null" json:"persona_id"`
-	ParentID    *int64    `gorm:"index" json:"parent_id"`
-	Name        string    `gorm:"size:200;not null" json:"name"`
-	Description string    `gorm:"size:500" json:"description"`
-	FileName    string    `gorm:"size:200;not null" json:"file_name"`
-	Content     string    `gorm:"type:text;not null" json:"content"`
-	Source      string    `gorm:"size:10;default:'db'" json:"source"`
-	StoragePath string    `gorm:"size:500" json:"storage_path"`
-	Priority    int       `gorm:"default:0" json:"priority"`
-	CreatedAt   time.Time `json:"created_at"`
-}
-
-type SkillKV struct {
-	ID          int64     `gorm:"primaryKey;autoIncrement" json:"id"`
-	SkillNodeID int64     `gorm:"index;not null" json:"skill_node_id"`
-	Key         string    `gorm:"size:200;not null" json:"key"`
-	Value       string    `gorm:"type:text;not null" json:"value"`
-	SortOrder   int       `gorm:"default:0" json:"sort_order"`
-	CreatedAt   time.Time `json:"created_at"`
+type PersonaFile struct {
+	ID            int64     `gorm:"primaryKey;autoIncrement" json:"id"`
+	PersonaID     int64     `gorm:"index;not null" json:"persona_id"`
+	FileName      string    `gorm:"size:255;not null" json:"file_name"`
+	MinioPath     string    `gorm:"size:500;not null" json:"minio_path"`
+	Priority      int       `gorm:"default:0" json:"priority"`
+	ModuleCategory string   `gorm:"size:100" json:"module_category"`
+	FileSize      int64     `json:"file_size"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type FileRecord struct {
@@ -94,5 +87,5 @@ type FileRecord struct {
 }
 
 func AutoMigrate(db *gorm.DB) {
-	db.AutoMigrate(&User{}, &Conversation{}, &Message{}, &Persona{}, &SkillNode{}, &SkillKV{}, &FileRecord{})
+	db.AutoMigrate(&User{}, &Conversation{}, &Message{}, &Persona{}, &PersonaFile{}, &FileRecord{})
 }

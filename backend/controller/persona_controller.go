@@ -20,20 +20,29 @@ import (
 )
 
 type PersonaController struct {
-	personaRepo *repository.PersonaRepository
-	convRepo    *repository.ConversationRepository
-	promptCache *skill.PromptCache
-	storage     service.FileStorage
-	fileRepo    *repository.FileRepository
+	personaRepo  *repository.PersonaRepository
+	pfRepo       *repository.PersonaFileRepository
+	convRepo     *repository.ConversationRepository
+	promptCache  *skill.PromptCache
+	personaCache *skill.PersonaCache
+	personaStg   *service.PersonaStorage
 }
 
-func NewPersonaController(personaRepo *repository.PersonaRepository, convRepo *repository.ConversationRepository, promptCache *skill.PromptCache, storage service.FileStorage, fileRepo *repository.FileRepository) *PersonaController {
+func NewPersonaController(
+	personaRepo *repository.PersonaRepository,
+	pfRepo *repository.PersonaFileRepository,
+	convRepo *repository.ConversationRepository,
+	promptCache *skill.PromptCache,
+	personaCache *skill.PersonaCache,
+	personaStg *service.PersonaStorage,
+) *PersonaController {
 	return &PersonaController{
-		personaRepo: personaRepo,
-		convRepo:    convRepo,
-		promptCache: promptCache,
-		storage:     storage,
-		fileRepo:    fileRepo,
+		personaRepo:  personaRepo,
+		pfRepo:       pfRepo,
+		convRepo:     convRepo,
+		promptCache:  promptCache,
+		personaCache: personaCache,
+		personaStg:   personaStg,
 	}
 }
 
@@ -48,17 +57,17 @@ func (ctl *PersonaController) GetPersonas(c *gin.Context) {
 
 	type personaWithCount struct {
 		model.Persona
-		SkillNodeCount int64 `json:"skill_node_count"`
-		IsBuiltIn      bool  `json:"is_built_in"`
+		FileCount int64 `json:"file_count"`
+		IsBuiltIn bool  `json:"is_built_in"`
 	}
 
 	result := make([]personaWithCount, 0, len(personas))
 	for _, p := range personas {
-		count, _ := ctl.personaRepo.CountSkillNodesByPersonaID(p.ID)
+		fileCount, _ := ctl.pfRepo.CountByPersonaID(p.ID)
 		result = append(result, personaWithCount{
-			Persona:        p,
-			SkillNodeCount: count,
-			IsBuiltIn:      p.UserID == 0,
+			Persona:   p,
+			FileCount: fileCount,
+			IsBuiltIn: p.UserID == 0,
 		})
 	}
 
@@ -79,29 +88,11 @@ func (ctl *PersonaController) GetPersona(c *gin.Context) {
 		return
 	}
 
-	nodes, err := ctl.personaRepo.FindSkillNodesByPersonaID(id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取技能节点失败"})
-		return
-	}
-
-	type skillNodeWithKVs struct {
-		model.SkillNode
-		KVs []model.SkillKV `json:"kvs"`
-	}
-
-	resultNodes := make([]skillNodeWithKVs, 0, len(nodes))
-	for _, node := range nodes {
-		kvs, _ := ctl.personaRepo.FindSkillKVsBySkillNodeID(node.ID)
-		resultNodes = append(resultNodes, skillNodeWithKVs{
-			SkillNode: node,
-			KVs:       kvs,
-		})
-	}
+	files, _ := ctl.pfRepo.FindByPersonaID(id)
 
 	c.JSON(http.StatusOK, gin.H{
-		"persona":      persona,
-		"skill_nodes":  resultNodes,
+		"persona":       persona,
+		"persona_files": files,
 	})
 }
 
@@ -110,6 +101,7 @@ func (ctl *PersonaController) CreatePersona(c *gin.Context) {
 
 	var req struct {
 		Name        string `json:"name"`
+		Nickname    string `json:"nickname"`
 		Description string `json:"description"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -117,20 +109,38 @@ func (ctl *PersonaController) CreatePersona(c *gin.Context) {
 		return
 	}
 
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
+	displayName := strings.TrimSpace(req.Nickname)
+	if displayName == "" {
+		displayName = strings.TrimSpace(req.Name)
+	}
+	if displayName == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "人格名称不能为空"})
 		return
+	}
+
+	dirName := service.SanitizeDirName(displayName)
+	if dirName == "" {
+		dirName = "persona"
 	}
 
 	persona := &model.Persona{
 		UserID:      userID,
 		Name:        utils.SanitizeInput(req.Name),
+		Nickname:    utils.SanitizeInput(displayName),
 		Description: utils.SanitizeInput(req.Description),
+		DirName:     dirName,
+		IsActive:    true,
+	}
+	if persona.Name == "" {
+		persona.Name = dirName
 	}
 	if err := ctl.personaRepo.Create(persona); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建人格失败"})
 		return
+	}
+
+	if ctl.personaCache != nil {
+		ctl.personaCache.UpsertPersona(persona)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -161,7 +171,9 @@ func (ctl *PersonaController) UpdatePersona(c *gin.Context) {
 
 	var req struct {
 		Name        *string `json:"name"`
+		Nickname    *string `json:"nickname"`
 		Description *string `json:"description"`
+		IsActive    *bool   `json:"is_active"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
@@ -171,13 +183,23 @@ func (ctl *PersonaController) UpdatePersona(c *gin.Context) {
 	if req.Name != nil {
 		persona.Name = utils.SanitizeInput(*req.Name)
 	}
+	if req.Nickname != nil {
+		persona.Nickname = utils.SanitizeInput(*req.Nickname)
+	}
 	if req.Description != nil {
 		persona.Description = utils.SanitizeInput(*req.Description)
+	}
+	if req.IsActive != nil {
+		persona.IsActive = *req.IsActive
 	}
 
 	if err := ctl.personaRepo.Update(persona); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新失败"})
 		return
+	}
+
+	if ctl.personaCache != nil {
+		ctl.personaCache.UpsertPersona(persona)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -211,7 +233,15 @@ func (ctl *PersonaController) DeletePersona(c *gin.Context) {
 		return
 	}
 
-	ctl.personaRepo.Delete(id)
+	if ctl.personaStg != nil {
+		ctl.personaStg.DeleteAllByPersona(persona)
+	}
+
+	ctl.personaRepo.HardDelete(id)
+
+	if ctl.personaCache != nil {
+		ctl.personaCache.DeletePersona(id)
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
 }
@@ -257,6 +287,11 @@ func (ctl *PersonaController) UploadSkillFile(c *gin.Context) {
 			continue
 		}
 
+		if ctl.personaStg == nil {
+			errors = append(errors, "MinIO 未配置，无法上传")
+			continue
+		}
+
 		file, err := header.Open()
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("打开文件失败 %s: %v", header.Filename, err))
@@ -270,69 +305,15 @@ func (ctl *PersonaController) UploadSkillFile(c *gin.Context) {
 			continue
 		}
 
-		parsed, err := skill.ParseSkillContent(header.Filename, string(content))
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("解析文件失败 %s: %v", header.Filename, err))
+		parsed, _ := skill.ParseSkillContent(header.Filename, string(content))
+		filePriority := 0
+		if parsed != nil {
+			filePriority = parsed.Meta.NumericPriority()
+		}
+
+		if _, err := ctl.personaStg.UploadMD(persona, header.Filename, content, filePriority); err != nil {
+			errors = append(errors, fmt.Sprintf("上传失败 %s: %v", header.Filename, err))
 			continue
-		}
-
-		var storagePath string
-		var fileRecordID int64
-		if ctl.storage != nil {
-			record, err := service.SaveUploadedFile(ctl.storage, "skill_raw", userID, "skill_node", 0, header)
-			if err == nil {
-				storagePath = record.StoragePath
-				fileRecordID = record.ID
-			}
-		}
-
-		nextPriority := 0
-		nodes, _ := ctl.personaRepo.FindSkillNodesByPersonaID(id)
-		if len(nodes) > 0 {
-			nextPriority = nodes[len(nodes)-1].Priority + 1
-		}
-
-		node := &model.SkillNode{
-			PersonaID:   id,
-			Name:        parsed.Meta.Name,
-			Description: parsed.Meta.Description,
-			FileName:    header.Filename,
-			Content:     string(content),
-			Source:      "db",
-			Priority:    nextPriority,
-		}
-		if storagePath != "" {
-			node.Source = "fs"
-			node.StoragePath = storagePath
-		}
-		if err := ctl.personaRepo.CreateSkillNode(node); err != nil {
-			errors = append(errors, fmt.Sprintf("保存节点失败 %s: %v", header.Filename, err))
-			continue
-		}
-
-		if fileRecordID > 0 && ctl.fileRepo != nil {
-			rec, _ := ctl.fileRepo.FindByID(fileRecordID)
-			if rec != nil {
-				rec.ReferenceID = node.ID
-				rec.ReferenceType = "skill_node"
-				ctl.fileRepo.Update(rec)
-			}
-		}
-
-		if len(parsed.KVList) > 0 {
-			kvs := make([]model.SkillKV, 0, len(parsed.KVList))
-			for ki, kv := range parsed.KVList {
-				kvs = append(kvs, model.SkillKV{
-					SkillNodeID: node.ID,
-					Key:         kv.Key,
-					Value:       kv.Value,
-					SortOrder:   ki,
-				})
-			}
-			if err := ctl.personaRepo.CreateSkillKVsBatch(kvs); err != nil {
-				errors = append(errors, fmt.Sprintf("保存键值对失败 %s: %v", header.Filename, err))
-				continue
-			}
 		}
 
 		uploaded = append(uploaded, header.Filename)
@@ -366,7 +347,7 @@ func (ctl *PersonaController) DeleteSkillFile(c *gin.Context) {
 
 	fileID, err := strconv.ParseInt(fileIDStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "技能节点ID无效"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "文件ID无效"})
 		return
 	}
 
@@ -381,23 +362,89 @@ func (ctl *PersonaController) DeleteSkillFile(c *gin.Context) {
 		return
 	}
 
-	node, err := ctl.personaRepo.FindSkillNodeByID(fileID)
-	if err != nil || node.PersonaID != personaID {
-		c.JSON(http.StatusNotFound, gin.H{"error": "技能节点不存在"})
+	if ctl.personaStg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "MinIO 未配置"})
 		return
 	}
 
-	if node.Source == "fs" && node.StoragePath != "" && ctl.storage != nil {
-		ctl.storage.Delete(&model.FileRecord{StoragePath: node.StoragePath})
+	pf, pfErr := ctl.pfRepo.FindByID(fileID)
+	if pfErr != nil || pf.PersonaID != personaID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "文件不存在"})
+		return
 	}
 
-	ctl.personaRepo.DeleteSkillNode(fileID)
+	if err := ctl.personaStg.DeleteMD(pf); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除文件失败"})
+		return
+	}
 
 	if ctl.promptCache != nil {
 		ctl.promptCache.Invalidate(personaID)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
+}
+
+func (ctl *PersonaController) UploadPersonaAvatar(c *gin.Context) {
+	userID := c.GetInt64("user_id")
+	idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "人格ID无效"})
+		return
+	}
+
+	persona, err := ctl.personaRepo.FindByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "人格不存在"})
+		return
+	}
+
+	if persona.UserID != userID && persona.UserID != 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权操作"})
+		return
+	}
+
+	if ctl.personaStg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "MinIO 未配置"})
+		return
+	}
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请提供图片文件"})
+		return
+	}
+	defer file.Close()
+
+	if header.Size > 1024*1024 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "文件超过 1MB 限制"})
+		return
+	}
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件失败"})
+		return
+	}
+
+	url, err := ctl.personaStg.UploadAvatar(persona.ID, header.Filename, data)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "上传失败: " + err.Error()})
+		return
+	}
+
+	persona.Avatar = url
+	ctl.personaRepo.Update(persona)
+
+	if ctl.personaCache != nil {
+		ctl.personaCache.UpsertPersona(persona)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "上传成功",
+		"avatar":  url,
+	})
 }
 
 func (ctl *PersonaController) SetConversationPersona(c *gin.Context) {
@@ -448,170 +495,6 @@ func (ctl *PersonaController) SetConversationPersona(c *gin.Context) {
 	})
 }
 
-func (ctl *PersonaController) LoadFromDirectory(c *gin.Context) {
-	userID := c.GetInt64("user_id")
-
-	skillsDir := config.AppConfig.SkillsDir
-	absDir, err := filepath.Abs(skillsDir)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "技能目录解析失败"})
-		return
-	}
-	absDir = filepath.Clean(absDir)
-
-	entries, err := os.ReadDir(absDir)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("读取技能目录失败: %v", err)})
-		return
-	}
-
-	loadedCount := 0
-	loadedPersonas := make(map[string]int64)
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			dirPath := filepath.Join(absDir, entry.Name())
-			dirName := entry.Name()
-
-			dirEntries, _ := os.ReadDir(dirPath)
-			var validMdFiles []string
-			for _, de := range dirEntries {
-				if !de.IsDir() && strings.HasSuffix(de.Name(), ".md") {
-					validMdFiles = append(validMdFiles, de.Name())
-				}
-			}
-			if len(validMdFiles) == 0 {
-				continue
-			}
-
-			existing, _ := ctl.personaRepo.FindByName(dirName)
-			if existing != nil {
-				if existing.UserID != 0 && existing.UserID != userID {
-					continue
-				}
-				ctl.personaRepo.DeleteSkillNodesByPersonaID(existing.ID)
-				ctl.personaRepo.Delete(existing.ID)
-			}
-
-			persona := &model.Persona{
-				UserID:      0,
-				Name:        dirName,
-				Description: fmt.Sprintf("包含 %d 个技能文件的人格", len(validMdFiles)),
-			}
-			if err := ctl.personaRepo.Create(persona); err != nil {
-				continue
-			}
-
-			for i, fn := range validMdFiles {
-				filePath := filepath.Join(dirPath, fn)
-				rawContent, err := os.ReadFile(filePath)
-				if err != nil {
-					continue
-				}
-
-				parsed, err := skill.ParseSkillContent(fn, string(rawContent))
-				if err != nil {
-					continue
-				}
-
-				node := &model.SkillNode{
-					PersonaID:   persona.ID,
-					Name:        parsed.Meta.Name,
-					Description: parsed.Meta.Description,
-					FileName:    fn,
-					Content:     string(rawContent),
-					Priority:    i,
-				}
-				if err := ctl.personaRepo.CreateSkillNode(node); err != nil {
-					continue
-				}
-
-				if len(parsed.KVList) > 0 {
-					kvs := make([]model.SkillKV, 0, len(parsed.KVList))
-					for ki, kv := range parsed.KVList {
-						kvs = append(kvs, model.SkillKV{
-							SkillNodeID: node.ID,
-							Key:         kv.Key,
-							Value:       kv.Value,
-							SortOrder:   ki,
-						})
-					}
-					ctl.personaRepo.CreateSkillKVsBatch(kvs)
-				}
-			}
-			loadedPersonas[dirName] = persona.ID
-			loadedCount++
-
-		} else if strings.HasSuffix(entry.Name(), ".md") {
-			filePath := filepath.Join(absDir, entry.Name())
-			rawContent, err := os.ReadFile(filePath)
-			if err != nil {
-				continue
-			}
-
-			parsed, err := skill.ParseSkillContent(entry.Name(), string(rawContent))
-			if err != nil {
-				continue
-			}
-
-			personaName := parsed.Meta.Name
-			existing, _ := ctl.personaRepo.FindByName(personaName)
-			if existing != nil {
-				if existing.UserID != 0 && existing.UserID != userID {
-					continue
-				}
-			} else {
-				persona := &model.Persona{
-					UserID:      0,
-					Name:        personaName,
-					Description: parsed.Meta.Description,
-				}
-				if err := ctl.personaRepo.Create(persona); err != nil {
-					continue
-				}
-				existing = persona
-			}
-
-			node := &model.SkillNode{
-				PersonaID:   existing.ID,
-				Name:        parsed.Meta.Name,
-				Description: parsed.Meta.Description,
-				FileName:    entry.Name(),
-				Content:     string(rawContent),
-				Priority:    0,
-			}
-			if err := ctl.personaRepo.CreateSkillNode(node); err != nil {
-				continue
-			}
-
-			if len(parsed.KVList) > 0 {
-				kvs := make([]model.SkillKV, 0, len(parsed.KVList))
-				for ki, kv := range parsed.KVList {
-					kvs = append(kvs, model.SkillKV{
-						SkillNodeID: node.ID,
-						Key:         kv.Key,
-						Value:       kv.Value,
-						SortOrder:   ki,
-					})
-				}
-				ctl.personaRepo.CreateSkillKVsBatch(kvs)
-			}
-		}
-		loadedCount++
-	}
-
-	if ctl.promptCache != nil {
-		for _, personaID := range loadedPersonas {
-			ctl.promptCache.Invalidate(personaID)
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": fmt.Sprintf("成功加载 %d 个人格", loadedCount),
-		"count":   loadedCount,
-	})
-}
-
 func (ctl *PersonaController) GetConversationPersona(c *gin.Context) {
 	userID := c.GetInt64("user_id")
 	convIDStr := c.Param("id")
@@ -644,4 +527,128 @@ func (ctl *PersonaController) GetConversationPersona(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"persona": persona})
+}
+
+func (ctl *PersonaController) DebugPrompt(c *gin.Context) {
+	userID := c.GetInt64("user_id")
+	convIDStr := c.Param("id")
+	convID, err := strconv.ParseInt(convIDStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "会话ID无效"})
+		return
+	}
+
+	conv, err := ctl.convRepo.FindByID(convID)
+	if err != nil || conv.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+
+	systemPrompt := ""
+	if conv.PersonaID != nil && ctl.promptCache != nil {
+		systemPrompt = ctl.promptCache.CompileAndCache(*conv.PersonaID)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"system_prompt": systemPrompt,
+	})
+}
+
+func (ctl *PersonaController) LoadFromDirectory(c *gin.Context) {
+	userID := c.GetInt64("user_id")
+
+	skillsDir := config.AppConfig.SkillsDir
+	if skillsDir == "" {
+		skillsDir = "../skills"
+	}
+
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("读取技能目录失败: %v", err)})
+		return
+	}
+
+	loadedCount := 0
+	loadedPersonas := make(map[string]int64)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dirName := entry.Name()
+
+			existing, _ := ctl.personaRepo.FindByDirName(dirName)
+			if existing != nil {
+				if existing.UserID != 0 && existing.UserID != userID {
+					continue
+				}
+				if ctl.personaStg != nil {
+					ctl.personaStg.DeleteAllByPersona(existing)
+				}
+				ctl.personaRepo.HardDelete(existing.ID)
+			}
+
+			persona := &model.Persona{
+				UserID:      0,
+				Name:        dirName,
+				Description: fmt.Sprintf("从 %s 目录加载", dirName),
+				DirName:     dirName,
+				IsActive:    true,
+			}
+			if err := ctl.personaRepo.Create(persona); err != nil {
+				continue
+			}
+
+			if err := loadSkillsDir(persona, ctl.personaStg); err != nil {
+				continue
+			}
+
+			loadedPersonas[dirName] = persona.ID
+			loadedCount++
+
+			if ctl.personaCache != nil {
+				ctl.personaCache.UpsertPersona(persona)
+			}
+		}
+	}
+
+	if ctl.promptCache != nil {
+		for _, personaID := range loadedPersonas {
+			ctl.promptCache.Invalidate(personaID)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("成功加载 %d 个人格", loadedCount),
+		"count":   loadedCount,
+	})
+}
+
+func loadSkillsDir(persona *model.Persona, personaStg *service.PersonaStorage) error {
+	if personaStg == nil {
+		return fmt.Errorf("persona storage not available")
+	}
+
+	skillsDir := config.AppConfig.SkillsDir
+	if skillsDir == "" {
+		skillsDir = "../skills"
+	}
+
+	dirPath := filepath.Join(skillsDir, persona.DirName)
+
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return err
+	}
+
+	for i, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(dirPath, entry.Name()))
+		if err != nil {
+			continue
+		}
+		personaStg.UploadMD(persona, entry.Name(), content, i)
+	}
+
+	return nil
 }

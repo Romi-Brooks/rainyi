@@ -1,11 +1,10 @@
 package skill
 
 import (
-	"bufio"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -16,9 +15,34 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type MDFileStorage interface {
+	UploadMD(persona *model.Persona, fileName string, content []byte, priority int) (*model.PersonaFile, error)
+	DownloadMD(pf *model.PersonaFile) ([]byte, error)
+	DeleteMD(pf *model.PersonaFile) error
+	DeleteAllByPersona(persona *model.Persona) error
+}
+
 type SkillMeta struct {
-	Name        string `yaml:"name"`
-	Description string `yaml:"description"`
+	Name         string `yaml:"name"`
+	Description  string `yaml:"description"`
+	AllowedTools string `yaml:"allowed-tools"`
+	Priority     string `yaml:"priority"`
+	Category     string `yaml:"category"`
+}
+
+func (m *SkillMeta) NumericPriority() int {
+	switch {
+	case m.Priority == "":
+		return 5
+	case strings.Contains(m.Priority, "高"), strings.Contains(m.Priority, "high"), strings.Contains(m.Priority, "urgent"):
+		return 0
+	case strings.Contains(m.Priority, "中"), strings.Contains(m.Priority, "medium"):
+		return 5
+	case strings.Contains(m.Priority, "低"), strings.Contains(m.Priority, "low"):
+		return 10
+	default:
+		return 5
+	}
 }
 
 type ParsedSkill struct {
@@ -33,70 +57,229 @@ type ParsedKV struct {
 }
 
 type SkillManager struct {
-	mu          sync.RWMutex
-	repo        *repository.PersonaRepository
-	promptCache *PromptCache
+	mu            sync.RWMutex
+	repo          *repository.PersonaRepository
+	promptCache   *PromptCache
+	personaCache  *PersonaCache
+	personaStg    MDFileStorage
 }
 
-func NewSkillManager(repo *repository.PersonaRepository) *SkillManager {
+func NewSkillManager(repo *repository.PersonaRepository, pfRepo *repository.PersonaFileRepository, personaStg MDFileStorage) *SkillManager {
+	personaCache := NewPersonaCache(repo, pfRepo)
 	return &SkillManager{
-		repo:        repo,
-		promptCache: NewPromptCache(repo),
+		repo:         repo,
+		promptCache:  NewPromptCache(personaCache, personaStg),
+		personaCache: personaCache,
+		personaStg:   personaStg,
 	}
 }
 
-func parseSkillFile(filePath string) (*ParsedSkill, error) {
-	file, err := os.Open(filePath)
+func (m *SkillManager) LoadSkills() error {
+	personas, err := m.repo.FindActive()
 	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	var lines []string
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+		return fmt.Errorf("failed to load active personas: %w", err)
 	}
 
-	if len(lines) < 2 || lines[0] != "---" {
-		return nil, fmt.Errorf("no valid frontmatter found")
+	m.personaCache.WarmupList(personas)
+
+	if err := m.seedFromLocalDir(); err != nil {
+		log.Printf("警告: skills 目录自动检测失败: %v", err)
 	}
 
-	endIndex := -1
-	for i := 1; i < len(lines); i++ {
-		if lines[i] == "---" {
-			endIndex = i
-			break
+	return nil
+}
+
+func (m *SkillManager) seedFromLocalDir() error {
+	skillsDir := config.AppConfig.SkillsDir
+	if skillsDir == "" {
+		skillsDir = "../skills"
+	}
+
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		return fmt.Errorf("读取 skills 目录失败: %w", err)
+	}
+
+	seeded := false
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if err := m.seedPersonaDir(filepath.Join(skillsDir, entry.Name()), entry.Name()); err != nil {
+				log.Printf("跳过人格目录 %s: %v", entry.Name(), err)
+				continue
+			}
+			seeded = true
 		}
 	}
-	if endIndex == -1 {
-		return nil, fmt.Errorf("no closing frontmatter delimiter found")
+
+	rootMDFiles := findRootMDFiles(entries)
+	for _, fn := range rootMDFiles {
+		if err := m.seedDefaultPersona(filepath.Join(skillsDir, fn)); err != nil {
+			log.Printf("跳过默认人格文件 %s: %v", fn, err)
+			continue
+		}
+		seeded = true
 	}
 
-	metaYaml := strings.Join(lines[1:endIndex], "\n")
-	var meta SkillMeta
-	if err := yaml.Unmarshal([]byte(metaYaml), &meta); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML frontmatter: %w", err)
+	if seeded && m.personaCache != nil {
+		personas, _ := m.repo.FindActive()
+		m.personaCache.WarmupList(personas)
 	}
 
-	if meta.Name == "" {
-		meta.Name = strings.TrimSuffix(filepath.Base(filePath), ".md")
-	}
-
-	bodyLines := lines[endIndex+1:]
-	kvList := parseKVFromBody(bodyLines)
-
-	return &ParsedSkill{
-		Meta:     meta,
-		FileName: filepath.Base(filePath),
-		KVList:   kvList,
-	}, nil
+	return nil
 }
 
-var headingRegex = regexp.MustCompile(`^#{1,6}\s+(.+)$`)
+func findRootMDFiles(entries []os.DirEntry) []string {
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
+			files = append(files, e.Name())
+		}
+	}
+	return files
+}
+
+func (m *SkillManager) seedPersonaDir(dirPath, dirName string) error {
+	if m.personaStg == nil {
+		return nil
+	}
+
+	existing, _ := m.repo.FindByDirName(dirName)
+	if existing != nil {
+		return nil
+	}
+
+	mdEntries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return err
+	}
+
+	var mdFiles []string
+	for _, e := range mdEntries {
+		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
+			mdFiles = append(mdFiles, e.Name())
+		}
+	}
+	if len(mdFiles) == 0 {
+		return fmt.Errorf("no md files found")
+	}
+
+	persona := &model.Persona{
+		UserID:      0,
+		Name:        dirName,
+		Description: fmt.Sprintf("从 %s 目录自动加载 (%d 个文件)", dirName, len(mdFiles)),
+		DirName:     dirName,
+		IsActive:    true,
+	}
+	if err := m.repo.Create(persona); err != nil {
+		return fmt.Errorf("创建人格失败: %w", err)
+	}
+
+	for _, fn := range mdFiles {
+		content, err := os.ReadFile(filepath.Join(dirPath, fn))
+		if err != nil {
+			continue
+		}
+		parsed, _ := ParseSkillContent(fn, string(content))
+		priority := 5
+		if parsed != nil {
+			priority = parsed.Meta.NumericPriority()
+		}
+		if _, err := m.personaStg.UploadMD(persona, fn, content, priority); err != nil {
+			log.Printf("上传 %s 失败: %v", fn, err)
+		}
+	}
+
+	log.Printf("自动加载人格: %s (%s, %d 个文件)", dirName, persona.DirName, len(mdFiles))
+	return nil
+}
+
+func (m *SkillManager) seedDefaultPersona(filePath string) error {
+	if m.personaStg == nil {
+		return nil
+	}
+
+	existing, _ := m.repo.FindByDirName("default")
+	if existing != nil {
+		return nil
+	}
+
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	fileName := filepath.Base(filePath)
+
+	persona := &model.Persona{
+		UserID:      0,
+		Name:        "默认人格",
+		Description: "系统内置默认人格，基于 SKILL-DEFAULT.md",
+		DirName:     "default",
+		IsActive:    true,
+	}
+	if err := m.repo.Create(persona); err != nil {
+		return fmt.Errorf("创建默认人格失败: %w", err)
+	}
+
+	parsed, _ := ParseSkillContent(fileName, string(content))
+	priority := 0
+	if parsed != nil {
+		priority = parsed.Meta.NumericPriority()
+	}
+
+	if _, err := m.personaStg.UploadMD(persona, fileName, content, priority); err != nil {
+		return fmt.Errorf("上传默认人格 MD 失败: %w", err)
+	}
+
+	log.Printf("自动加载默认人格: %s (dir_name=default)", fileName)
+	return nil
+}
+
+func (m *SkillManager) GetSystemPromptByPersona(personaID *int64) string {
+	if personaID == nil {
+		return "你是一个温柔、耐心、治愈的情感陪伴助手，像一个温暖的朋友。"
+	}
+
+	if cached, ok := m.promptCache.Get(*personaID); ok {
+		return cached
+	}
+
+	prompt := m.promptCache.CompileAndCache(*personaID)
+	if prompt == "" {
+		return "你是一个温柔、耐心、治愈的情感陪伴助手，像一个温暖的朋友。"
+	}
+
+	return prompt
+}
+
+func (m *SkillManager) GetPersonaNames() ([]string, error) {
+	return m.personaCache.GetPersonaNames()
+}
+
+func (m *SkillManager) PersonaCache() *PersonaCache {
+	return m.personaCache
+}
+
+func (m *SkillManager) PromptCache() *PromptCache {
+	return m.promptCache
+}
+
+func (m *SkillManager) PersonaStorage() MDFileStorage {
+	return m.personaStg
+}
+
+func (m *SkillManager) Refresh() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.repo.HardDelete(0); err != nil {
+		return fmt.Errorf("failed to clear built-in personas: %w", err)
+	}
+
+	m.personaCache.InvalidateAll()
+
+	return nil
+}
 
 func ParseSkillContent(fileName string, content string) (*ParsedSkill, error) {
 	lines := strings.Split(content, "\n")
@@ -155,10 +338,9 @@ func parseKVFromBody(lines []string) []ParsedKV {
 	}
 
 	for _, line := range lines {
-		matches := headingRegex.FindStringSubmatch(line)
-		if matches != nil {
+		if strings.HasPrefix(line, "#") && (len(line) == 1 || line[1] == ' ') {
 			flush()
-			currentKey = strings.TrimSpace(matches[1])
+			currentKey = strings.TrimSpace(line[1:])
 			currentValueLines = nil
 		} else if currentKey != "" {
 			currentValueLines = append(currentValueLines, line)
@@ -176,216 +358,76 @@ func parseKVFromBody(lines []string) []ParsedKV {
 	return kvs
 }
 
-func (m *SkillManager) LoadSkills() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func CompilePromptFromFiles(files []model.PersonaFile, personaStg MDFileStorage, personaCache *PersonaCache, personaID int64) string {
+	var builder strings.Builder
+
+	for _, f := range files {
+		mdContent, err := personaCache.GetMDContent(personaID, &f)
+		if err != nil || mdContent == "" {
+			if personaStg != nil {
+				data, dlErr := personaStg.DownloadMD(&f)
+				if dlErr == nil {
+					mdContent = string(data)
+					personaCache.SetMDContent(personaID, &f, mdContent)
+				}
+			}
+		}
+
+		if mdContent == "" {
+			continue
+		}
+
+		parsed, parseErr := ParseSkillContent(f.FileName, mdContent)
+		if parseErr != nil {
+			builder.WriteString(mdContent)
+			builder.WriteString("\n\n")
+			continue
+		}
+
+		for _, kv := range parsed.KVList {
+			builder.WriteString(fmt.Sprintf("# %s\n%s\n\n", kv.Key, kv.Value))
+		}
+	}
+
+	return strings.TrimSpace(builder.String())
+}
+
+func (m *SkillManager) LoadMDFromLocal(persona *model.Persona) error {
+	if m.personaStg == nil {
+		return fmt.Errorf("persona storage not available")
+	}
 
 	skillsDir := config.AppConfig.SkillsDir
-	absDir, err := filepath.Abs(skillsDir)
-	if err != nil {
-		return fmt.Errorf("failed to resolve skills directory: %w", err)
-	}
-	absDir = filepath.Clean(absDir)
-
-	entries, err := os.ReadDir(absDir)
-	if err != nil {
-		return fmt.Errorf("failed to read skills directory %s: %w", absDir, err)
+	if skillsDir == "" {
+		skillsDir = "../skills"
 	}
 
-	for _, entry := range entries {
-		if entry.IsDir() {
-			dirPath := filepath.Join(absDir, entry.Name())
-			if err := m.loadPersonaFromDir(dirPath, entry.Name()); err != nil {
-				continue
-			}
-		} else if strings.HasSuffix(entry.Name(), ".md") {
-			filePath := filepath.Join(absDir, entry.Name())
-			filePath = filepath.Clean(filePath)
+	dirPath := filepath.Join(skillsDir, persona.DirName)
 
-			if !strings.HasPrefix(filePath, absDir) {
-				continue
-			}
-
-			if err := m.loadSingleMDFile(filePath); err != nil {
-				continue
-			}
-		}
-	}
-
-	personas, _ := m.repo.FindAllVisible(0)
-	for _, p := range personas {
-		m.promptCache.CompileAndCache(p.ID)
-	}
-
-	return nil
-}
-
-func (m *SkillManager) loadSingleMDFile(filePath string) error {
-	parsed, err := parseSkillFile(filePath)
-	if err != nil {
-		return err
-	}
-
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return err
-	}
-
-	personaName := parsed.Meta.Name
-	existing, _ := m.repo.FindByName(personaName)
-	if existing == nil {
-		persona := &model.Persona{
-			UserID:      0,
-			Name:        personaName,
-			Description: parsed.Meta.Description,
-		}
-		if err := m.repo.Create(persona); err != nil {
-			return fmt.Errorf("failed to create persona %s: %w", personaName, err)
-		}
-		existing = persona
-	}
-
-	if err := m.createSkillNodeWithKVs(existing.ID, parsed, string(content), 0); err != nil {
-		return fmt.Errorf("failed to save skill %s: %w", parsed.FileName, err)
-	}
-
-	m.promptCache.Invalidate(existing.ID)
-
-	return nil
-}
-
-func (m *SkillManager) loadPersonaFromDir(dirPath string, dirName string) error {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read skills dir %s: %w", dirPath, err)
 	}
 
-	var parsedSkills []*ParsedSkill
-	var rawContents []string
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+	for i, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") {
 			continue
 		}
 
-		filePath := filepath.Join(dirPath, entry.Name())
-		filePath = filepath.Clean(filePath)
-
-		parsed, err := parseSkillFile(filePath)
+		content, err := os.ReadFile(filepath.Join(dirPath, entry.Name()))
 		if err != nil {
 			continue
 		}
 
-		rawContent, err := os.ReadFile(filePath)
+		_, err = m.personaStg.UploadMD(persona, entry.Name(), content, i)
 		if err != nil {
 			continue
 		}
-
-		parsedSkills = append(parsedSkills, parsed)
-		rawContents = append(rawContents, string(rawContent))
-	}
-
-	if len(parsedSkills) == 0 {
-		return fmt.Errorf("no valid skill files in directory %s", dirName)
-	}
-
-	existing, _ := m.repo.FindByName(dirName)
-	if existing != nil {
-		m.repo.DeleteSkillNodesByPersonaID(existing.ID)
-		m.repo.Delete(existing.ID)
-	}
-
-	persona := &model.Persona{
-		UserID:      0,
-		Name:        dirName,
-		Description: fmt.Sprintf("包含 %d 个技能文件的人格", len(parsedSkills)),
-	}
-	if err := m.repo.Create(persona); err != nil {
-		return fmt.Errorf("failed to create persona from dir %s: %w", dirName, err)
-	}
-
-	for i, ps := range parsedSkills {
-		if err := m.createSkillNodeWithKVs(persona.ID, ps, rawContents[i], i); err != nil {
-			return err
-		}
-	}
-
-	m.promptCache.Invalidate(persona.ID)
-
-	return nil
-}
-
-func (m *SkillManager) createSkillNodeWithKVs(personaID int64, parsed *ParsedSkill, content string, priority int) error {
-	node := &model.SkillNode{
-		PersonaID:   personaID,
-		Name:        parsed.Meta.Name,
-		Description: parsed.Meta.Description,
-		FileName:    parsed.FileName,
-		Content:     content,
-		Priority:    priority,
-	}
-	if err := m.repo.CreateSkillNode(node); err != nil {
-		return fmt.Errorf("failed to create skill node: %w", err)
-	}
-
-	if len(parsed.KVList) > 0 {
-		kvs := make([]model.SkillKV, 0, len(parsed.KVList))
-		for i, kv := range parsed.KVList {
-			kvs = append(kvs, model.SkillKV{
-				SkillNodeID: node.ID,
-				Key:         kv.Key,
-				Value:       kv.Value,
-				SortOrder:   i,
-			})
-		}
-		if err := m.repo.CreateSkillKVsBatch(kvs); err != nil {
-			return fmt.Errorf("failed to create skill KVs: %w", err)
-		}
 	}
 
 	return nil
 }
 
-func (m *SkillManager) GetSystemPromptByPersona(personaID *int64) string {
-	if personaID == nil {
-		return "你是一个温柔、耐心、治愈的情感陪伴助手，像一个温暖的朋友。"
-	}
-
-	if cached, ok := m.promptCache.Get(*personaID); ok {
-		return cached
-	}
-
-	prompt := m.promptCache.CompileAndCache(*personaID)
-	if prompt == "" {
-		return "你是一个温柔、耐心、治愈的情感陪伴助手，像一个温暖的朋友。"
-	}
-
-	return prompt
-}
-
-func (m *SkillManager) GetPersonaNames() ([]string, error) {
-	personas, err := m.repo.FindAllVisible(0)
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(personas))
-	for _, p := range personas {
-		names = append(names, p.Name)
-	}
-	return names, nil
-}
-
-func (m *SkillManager) Refresh() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if err := m.repo.DeleteAllByUserID(0); err != nil {
-		return fmt.Errorf("failed to clear built-in personas: %w", err)
-	}
-
-	return nil
-}
-
-func (m *SkillManager) PromptCache() *PromptCache {
-	return m.promptCache
+func (m *SkillManager) Repo() *repository.PersonaRepository {
+	return m.repo
 }

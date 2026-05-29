@@ -121,11 +121,22 @@ func (ctl *ChatController) readPump(client *service.Client) {
 		content := utils.SanitizeContent(msg.Content)
 		userID := client.UserID
 
-		conv, err := ctl.convRepo.FindOrCreateDefault(userID)
-		if err != nil {
-			log.Printf("FindOrCreateDefault error: %v", err)
-			ctl.hub.SendError(userID, "会话创建失败")
-			continue
+		var conv *model.Conversation
+		var findErr error
+		if msg.ConversationID > 0 {
+			conv, findErr = ctl.convRepo.FindByID(msg.ConversationID)
+			if findErr != nil || conv.UserID != userID {
+				log.Printf("Conversation not found or not owned: %d", msg.ConversationID)
+				ctl.hub.SendError(userID, "会话不存在")
+				continue
+			}
+		} else {
+			conv, findErr = ctl.convRepo.FindOrCreateDefault(userID)
+			if findErr != nil {
+				log.Printf("FindOrCreateDefault error: %v", findErr)
+				ctl.hub.SendError(userID, "会话创建失败")
+				continue
+			}
 		}
 
 		userMessage := &model.Message{
